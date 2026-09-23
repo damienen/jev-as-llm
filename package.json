@@ -1,0 +1,36 @@
+{
+  "name": "jev-as-llm",
+  "version": "1.0.0",
+  "description": "Jev (TypeSafe System One) forced to chat like an LLM, one character at a time",
+  "scripts": {
+    "dev": "next dev",
+    "eval": "tsx eval/run.ts",
+    "one": "tsx scripts/one.ts",
+    "build": "next build",
+    "build:vocab": "tsx scripts/build-vocab.ts",
+    "typecheck": "tsc",
+    "start": "next start"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "countries-list": "^3.4.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "wordlist-english": "^1.2.1"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "geist": "^1.7.2",
+    "next": "^16.3.6",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "type": "module"
+}
