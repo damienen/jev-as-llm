@@ -17,7 +17,7 @@ Browser (Next.js page, client component)                      OpenRouter
 
 - The key is stored in the browser (localStorage) and sent only to `openrouter.ai`.
 - The site sends a `Content-Security-Policy` header with `connect-src 'self' https://openrouter.ai`, so the browser refuses to send data anywhere else. Anyone can check it in the Network tab or the response headers.
-- `/api/t` keeps only step count, tokens, time, lookups, settings and stop reason, and drops any other field. It writes one `jev-telemetry {...}` line per reply to the function logs. Set `NEXT_PUBLIC_TELEMETRY=off` to turn it off.
+- `/api/t` keeps only step count, tokens, time, lookups and stop reason, and drops any other field. It writes one `jev-telemetry {...}` line per reply to the function logs. Set `NEXT_PUBLIC_TELEMETRY=off` to turn it off.
 - Why OpenRouter: `api.typesafe.ai` rejects browser requests from other sites (CORS), while OpenRouter serves the same Jev with the same request format and allows any origin.
 
 ## How it works
@@ -52,13 +52,14 @@ npm run build:vocab                          # regenerate src/lib/generated/voca
 
 | Path | What |
 |---|---|
-| `src/components/JevChat.tsx` | The chat UI (client component; all Jev calls happen here, in the browser) |
-| `src/app/` | `layout.tsx`, `page.tsx`, `globals.css`, `icon.svg`, and `api/t/route.ts` (anonymous telemetry) |
+| `src/components/` | The chat UI (client components; all Jev calls happen in the browser): `JevChat`, `ReplyText` (word chips), `Inspector`, `KeyEntry`, `BottomSheet` |
+| `src/lib/demos.json`, `scripts/record-demos.ts` | Recorded runs that visitors without a key can replay, and the script that records them |
+| `src/app/` | `layout.tsx`, `page.tsx`, `globals.css`, `icon.svg`, `opengraph-image.tsx` (link preview) and `api/t/route.ts` (anonymous telemetry) |
 | `next.config.ts` | Security headers, including the Content-Security-Policy |
 | `src/lib/decode.ts` | The decoder loop: word choice, lookup, optional judge, rules, context window |
 | `src/lib/wordgen.ts` | The Jev questions: next word, first letter, dictionary lists, final pick |
 | `src/lib/jev.ts` | Fetch client for OpenRouter (browser and Node) or TypeSafe (Node only), errors, judge |
 | `src/lib/words.ts`, `src/lib/vocab.ts`, `src/lib/generated/vocab.json` | Candidate word list and spacing rules; the 75k-word dictionary |
-| `scripts/` | Single-prompt runner and dictionary build |
+| `scripts/` | Single-prompt runner, demo recorder and dictionary build |
 | `eval/` | Eval cases (20 prompts with automatic checks) and the runner |
 | `results/` | Eval reports and the transcripts quoted in the experiment log |

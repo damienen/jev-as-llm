@@ -261,6 +261,23 @@ There are 20 prompts in `eval/cases.ts` (6 tuning, 14 held out). Each has automa
   - no horizontal overflow at 1280px or 375px
   - a real reply through OpenRouter (`npm run one -- "What is 2 + 2?"` → `4`)
 
+## Pre-launch polish (website)
+
+Decided in a design interview with the user:
+- **Word chips:** a reply renders as the tokens Jev chose. Hover or tap lights up the whole choice, dictionary words have a dotted underline, and the inspector explains the lookup ("after searching 19,375 words starting with s, r or p").
+- **Replay:** re-reveals a reply at 250 ms per word, holding 800 ms on dictionary lookups. After a reply, the inspector opens on its most interesting step (the first lookup, else the least confident word), and a one-time hint says words are clickable.
+- **Recorded demos:** visitors without a key can click any of 6 example prompts to play real Jev runs recorded with `scripts/record-demos.ts` (tagged "recorded run"). With a key, the same prompts run live.
+- **Key-first composer:** without a key, the message box becomes the key field. The trust line sits next to it, with a tip to give the key a credit limit and an expiry date.
+- **Phones:** tapping a word opens a bottom sheet.
+- **Layout shift:** the whole desktop flow (load, save key, send, error) measured a CLS of 0.0017.
+- **Link preview:** an `opengraph-image` card built from the France demo.
+- **Less clutter:** no settings, no examples dropdown, no top-right counter.
+- **Decoder fixes found while recording demos:**
+  - When the dictionary found nothing, the fallback word skipped the grammar and repeat rules. That produced `the.` and an `is is is` loop that ran for 167 s.
+  - A word pair may now appear at most twice.
+  - Articles can't be followed by possessives ("the your").
+- **Known gap:** proper names outside the country and capital lists (e.g. "Thames") can't be found, so replies about them degrade.
+
 ## Reproduce
 
 ```bash

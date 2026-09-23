@@ -61,6 +61,8 @@ export interface Candidate {
 export interface StepEvent {
   step: number;
   label: string; // the chosen word; "<OTHER>→word" when it came from the dictionary
+  /** For dictionary words: the first letters searched and how many words that covered. */
+  lookup?: { letters: string[]; searched: number };
   text: string; // reply so far
   top: Candidate[]; // top options of the step's word Choice
   confidence: number;
@@ -104,7 +106,8 @@ function sample(d: Distribution, temperature: number): string {
 // Jev's probabilities come rounded to 2 decimals; treat 0 as "below 0.005".
 const FLOOR_P = 0.001;
 const ARTICLES = new Set(["a", "an", "the"]);
-const PRONOUNS = new Set(["i", "i'm", "i'll", "i've", "you", "you're", "he", "she", "it", "it's", "we", "they", "me", "us", "them"]);
+// Words that can't follow an article: pronouns and possessives ("the it's", "the your").
+const PRONOUNS = new Set(["i", "i'm", "i'll", "i've", "you", "you're", "he", "she", "it", "it's", "we", "they", "me", "us", "them", "my", "your", "his", "her", "its", "our", "their", "this", "that", "these", "those"]);
 
 /** A candidate must change the reply, not repeat the previous word, and not break simple article grammar. */
 export function progresses(reply: string, token: string): boolean {
@@ -116,7 +119,12 @@ export function progresses(reply: string, token: string): boolean {
   // An article is followed by a word: never punctuation, another article, or a pronoun.
   if (ARTICLES.has(last) && (ARTICLES.has(token) || !/^[a-z0-9]/.test(token))) return false;
   if (ARTICLES.has(last) && PRONOUNS.has(token)) return false;
-  return true;
+  // Loop guard: the same word pair may appear at most twice ("is the ... is the ... is the" stops).
+  const words = reply.match(/[a-z0-9']+|[.,!?:]/g) ?? [];
+  const prev = words[words.length - 1];
+  let seen = 0;
+  for (let i = 1; i < words.length; i++) if (words[i - 1] === prev && words[i] === token) seen++;
+  return seen < 2;
 }
 
 // ---- the decoder --------------------------------------------------------------
@@ -147,7 +155,7 @@ async function runWords(
   // An unlisted word: likely first letters -> every word under them, as parallel
   // chunked Choices -> final pick among the chunk winners. Null if nothing fits.
   const letters = [...new Set(vocab.bucket("").map((w) => w[0]))].filter((c) => /[a-z]/.test(c)).sort();
-  async function lookUp(): Promise<{ word: string | null; tokens: number; ms: number; path: string[] }> {
+  async function lookUp(): Promise<{ word: string | null; tokens: number; ms: number; path: string[]; letters: string[]; searched: number }> {
     const g = await chooseGroup(conversation, reply, letters.map((l) => ({ key: l, examples: vocab.bucket(l).slice(0, 5) })), signal);
     const picked = topOf(g.distribution, LOOKUP_LETTERS).filter((c, i) => i === 0 || c.p >= LOOKUP_LETTER_MIN_P).map((c) => c.label);
     const chunks: string[][] = [];
@@ -157,13 +165,14 @@ async function runWords(
     }
     const c = await chooseFromChunks(conversation, reply, chunks, signal);
     const path = [picked.map((l) => l + "…").join("/")];
+    const searched = chunks.reduce((n, c) => n + c.length, 0);
     const used = g.inputTokens + c.inputTokens;
     const ms = g.latencyMs + c.latencyMs;
-    if (c.winners.length === 0) return { word: null, tokens: used, ms, path: [...path, NONE] };
+    if (c.winners.length === 0) return { word: null, tokens: used, ms, path: [...path, NONE], letters: picked, searched };
     const finalists = c.winners.sort((a, b) => b.p - a.p).slice(0, 40).map((w) => w.word);
     const f = await chooseWord(conversation, reply, finalists, signal);
     const word = sample(f.distribution, s.temperature);
-    return { word: word === NONE ? null : word, tokens: used + f.inputTokens, ms: ms + f.latencyMs, path: [...path, `${finalists.length} finalists`, word] };
+    return { word: word === NONE ? null : word, tokens: used + f.inputTokens, ms: ms + f.latencyMs, path: [...path, `${finalists.length} finalists`, word], letters: picked, searched };
   }
 
   for (let step = 0; ; step++) {
@@ -176,12 +185,14 @@ async function runWords(
     let ms = pick.latencyMs;
     let path: string[] | undefined;
     let fromOther: string | null = null;
+    let lookup: StepEvent["lookup"];
     const resolveOther = async () => {
       const found = await lookUp();
       used += found.tokens;
       ms += found.ms;
       path = found.path;
       fromOther = found.word;
+      lookup = { letters: found.letters, searched: found.searched };
       return found.word;
     };
 
@@ -218,14 +229,19 @@ async function runWords(
       const ok = Object.fromEntries(Object.entries(pick.distribution).filter(([t]) => progresses(reply, t)));
       token = sample(ok, s.temperature);
       // Nothing in the dictionary fits: fall back to the best listed token.
-      if (token === OTHER) token = (await resolveOther()) ?? topOf(pick.distribution).find((c) => c.label !== OTHER && c.label !== END)!.label;
+      if (token === OTHER) {
+        // The dictionary word must obey the same rules; otherwise fall back to the best allowed listed token.
+        const w = await resolveOther();
+        token = w && progresses(reply, w) ? w : (topOf(ok).find((c) => c.label !== OTHER)?.label ?? END);
+      }
     }
 
     // 4. Code appends the word (spacing, a/an) and streams it.
     inputTokens += used;
     trace.push({ step, token, path, judged, confidence: pick.confidence, inputTokens: used, latencyMs: ms, distribution: pick.distribution });
     if (token !== END) reply = joinToken(reply, token);
-    onStep({ step, label: fromOther === token ? `${OTHER}→${token}` : token, text: reply, top: topOf(pick.distribution), confidence: pick.confidence, inputTokens: used, latencyMs: ms });
+    const viaDictionary = fromOther === token;
+    onStep({ step, label: viaDictionary ? `${OTHER}→${token}` : token, lookup: viaDictionary ? lookup : undefined, text: reply, top: topOf(pick.distribution), confidence: pick.confidence, inputTokens: used, latencyMs: ms });
     if (token === END) return { text: reply, stopReason: "end", steps: step + 1, inputTokens, trace };
   }
 }

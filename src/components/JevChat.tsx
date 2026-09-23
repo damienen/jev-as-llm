@@ -1,80 +1,115 @@
 "use client";
 
-// The whole chat runs in the visitor's browser. The decoder asks Jev through
-// OpenRouter with the visitor's own key; no server of ours sees the key. The
-// only request to this site is an anonymous usage count (/api/t, numbers only).
+// The whole chat runs in the visitor's browser. Live replies ask Jev through
+// OpenRouter with the visitor's own key; no server of ours sees the key.
+// Without a key, the example prompts play real recorded runs instead.
 
 import { useEffect, useRef, useState } from "react";
-import { CONTEXT_BUDGET, DEFAULTS, estimateTokens, fitContext, generate, type Candidate } from "@/lib/decode";
+import demosData from "@/lib/demos.json";
+import { CONTEXT_BUDGET, DEFAULTS, estimateTokens, fitContext, generate } from "@/lib/decode";
 import { setProvider, type JevErrorCode, type Turn } from "@/lib/jev";
-import { PRESETS } from "@/lib/presets";
 import { preloadVocabulary } from "@/lib/vocab";
+import BottomSheet from "./BottomSheet";
+import Inspector, { fromDictionary, inspectorTitle, type InspectorState, type Step } from "./Inspector";
+import KeyEntry from "./KeyEntry";
+import ReplyText, { tokenize } from "./ReplyText";
 
 const TELEMETRY = process.env.NEXT_PUBLIC_TELEMETRY !== "off";
 /** Fixed: temperature 0 (always Jev's top choice), replies capped at 300 characters, judge off. */
 const SETTINGS = DEFAULTS;
+/** Replay pace: readable, with a pause on dictionary lookups. */
+const STEP_MS = 250;
+const LOOKUP_MS = 800;
 
-interface Step { label: string; top: Candidate[]; confidence: number; latencyMs: number; inputTokens: number }
+interface Demo { id: string; prompt: string; text: string; stopReason: string; ms: number; steps: (Step & { text: string })[] }
+const DEMOS = demosData as unknown as Demo[];
+
 interface Message {
   role: Turn["role"];
   text: string;
   steps?: Step[];
   charStep?: number[]; // which step produced each character
-  live?: boolean;
-  meta?: string;
+  source?: "live" | "recorded";
+  live?: boolean; // still being written
+  shown?: number; // while replaying: how many steps are revealed
+  status?: string;
   error?: boolean;
   trimmed?: number;
 }
-interface Inspector { title: string; step: Step | null; loading: boolean }
 
 const store = {
   get<T>(k: string, d: T): T { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
   set(k: string, v: unknown) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
-
-const SHOW: Record<string, string> = { SPACE: "␣", NEWLINE: "↵", "<END>": "stop", "<OTHER>": "look up", "<NONE>": "none" };
-const show = (label: string) => (SHOW[label] ?? label).replace("<OTHER>→", "");
-const fromDictionary = (label: string) => label.startsWith("<OTHER>→");
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const ERROR_COPY: Partial<Record<JevErrorCode, string>> = {
-  missing_key: "Add your OpenRouter API key in the panel.",
-  invalid_key: "OpenRouter rejected that API key. Check it in the panel and try again.",
+  missing_key: "Add your OpenRouter API key first.",
+  invalid_key: "OpenRouter rejected that API key. It may be mistyped or expired.",
   no_credits: "Your OpenRouter account is out of credits. Top it up at openrouter.ai and send again.",
   rate_limited: "OpenRouter is rate limiting you. Give it a moment.",
   network: "Couldn't reach OpenRouter. Check your connection.",
   upstream: "OpenRouter or Jev couldn't answer this time. Try again in a minute.",
 };
-const IDLE: Inspector = { title: "What Jev is choosing", step: null, loading: false };
+
+/** Map each character of the final text to the step that wrote it, from the per-step texts. */
+function charStepsFrom(texts: string[]): number[] {
+  const out: number[] = [];
+  texts.forEach((t, i) => { for (let c = out.length; c < t.length; c++) out[c] = i; });
+  return out;
+}
+
+/** The step most worth looking at first: a dictionary lookup, else the least confident word. */
+function interestingStep(steps: Step[]): number {
+  const lookup = steps.findIndex((s) => s.lookup);
+  if (lookup >= 0) return lookup;
+  let best = -1;
+  steps.forEach((s, i) => {
+    if (!/^[a-z0-9']/.test(s.label)) return; // skip stop, punctuation, line breaks
+    if (best < 0 || s.confidence < steps[best].confidence) best = i;
+  });
+  return Math.max(best, 0);
+}
+
+const stepTitle = (si: number) => `Step ${si + 1}: next word`;
+const statusText = (why: string, n: number, secs?: number) => {
+  const steps = `${n} step${n === 1 ? "" : "s"}${secs !== undefined ? `, ${secs.toFixed(1)} s` : ""}`;
+  return why === "end" ? `Jev decided it was done. ${steps}.` : why === "max_chars" ? `Stopped at the length limit. ${steps}.` : `You stopped it. ${steps}.`;
+};
 
 export default function JevChat() {
   const [ready, setReady] = useState(false);
   const [apiKey, setApiKey] = useState("");
-  const [keyDraft, setKeyDraft] = useState("");
   const [attention, setAttention] = useState(false);
   const [thread, setThread] = useState<Message[]>([]);
   const [tokens, setTokens] = useState(0);
-  const [contextTokens, setContextTokens] = useState<number | null>(null);
-  const [running, setRunning] = useState(false);
-  const [inspector, setInspector] = useState<Inspector>(IDLE);
-  const [selected, setSelected] = useState<{ msg: number; char: number } | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [contextTokens, setContextTokens] = useState(0);
+  const [busy, setBusy] = useState<"idle" | "live" | "replay">("idle");
+  const [inspector, setInspector] = useState<InspectorState>({ kind: "idle" });
+  const [selected, setSelected] = useState<{ msg: number; step: number } | null>(null);
+  const [hover, setHover] = useState<{ msg: number; step: number } | null>(null);
+  const [hintSeen, setHintSeen] = useState(true);
+  const [mobile, setMobile] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
   const [input, setInput] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  const replayRef = useRef<{ cancelled: boolean } | null>(null);
   const threadRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const keyInputRef = useRef<HTMLInputElement>(null);
-  const keySectionRef = useRef<HTMLElement>(null);
 
   // Load what this browser remembers. The key never leaves localStorage except to go to OpenRouter.
   useEffect(() => {
-    try { localStorage.removeItem("jev.key"); } catch {} // an older version stored a TypeSafe key here
-    const key = store.get("jev.openrouterKey", "");
-    setApiKey(key);
-    setKeyDraft(key);
-    try { localStorage.removeItem("jev.settings"); } catch {} // settings are fixed now
-    setThread(store.get<Message[]>("jev.thread", []).map((m) => ({ ...m, live: false })));
+    try { localStorage.removeItem("jev.key"); localStorage.removeItem("jev.settings"); } catch {} // older versions
+    setApiKey(store.get("jev.openrouterKey", ""));
+    setThread(store.get<Message[]>("jev.thread", []).map(({ live, shown, ...m }) => m));
     setTokens(store.get("jev.tokens", 0));
+    setHintSeen(store.get("jev.hintSeen", false));
     setReady(true);
+    const mq = window.matchMedia("(max-width: 900px)");
+    const onChange = () => setMobile(mq.matches);
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
   }, []);
 
   useEffect(() => {
@@ -83,52 +118,86 @@ export default function JevChat() {
   }, [apiKey]);
 
   useEffect(() => {
-    if (!ready || running) return;
-    store.set("jev.thread", thread);
+    if (!ready || busy !== "idle") return;
+    store.set("jev.thread", thread.map(({ live, shown, ...m }) => m));
     store.set("jev.tokens", tokens);
-  }, [ready, running, thread, tokens]);
+  }, [ready, busy, thread, tokens]);
 
+  // Follow the text while Jev writes or replays.
   useEffect(() => {
     const el = threadRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [thread]);
+    if (el && busy !== "idle") el.scrollTop = el.scrollHeight;
+  }, [thread, busy]);
 
-  function saveKey() {
-    const key = keyDraft.trim();
-    setApiKey(key);
-    store.set("jev.openrouterKey", key);
-    setNotice(null);
-    setAttention(false);
-  }
-  function forgetKey() {
-    setApiKey("");
-    setKeyDraft("");
-    store.set("jev.openrouterKey", "");
-  }
-  function askForKey() {
-    setAttention(true);
-    keySectionRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    keyInputRef.current?.focus();
+  const updateMsg = (mi: number, patch: Partial<Message>) => setThread((t) => t.map((m, i) => (i === mi ? { ...m, ...patch } : m)));
+
+  function showStep(mi: number, si: number, steps: Step[]) {
+    setSelected({ msg: mi, step: si });
+    setInspector({ kind: "step", title: stepTitle(si), step: steps[si] });
   }
 
-  async function send(text: string) {
-    if (running || !text.trim()) return;
+  function select(mi: number, si: number) {
+    const steps = thread[mi]?.steps;
+    if (!steps?.[si] || busy !== "idle") return;
+    showStep(mi, si, steps);
+    if (!hintSeen) { setHintSeen(true); store.set("jev.hintSeen", true); }
+    if (mobile) setSheetOpen(true);
+  }
+
+  /** Reveal a finished reply step by step. Used by the Replay link and the recorded demos. */
+  async function replay(mi: number, msg: Message) {
+    const steps = msg.steps!;
+    const run = { cancelled: false };
+    replayRef.current = run;
+    setBusy("replay");
+    updateMsg(mi, { shown: 0 });
+    for (let k = 0; k < steps.length && !run.cancelled; k++) {
+      const lookup = steps[k].lookup;
+      if (lookup) {
+        setInspector({ kind: "searching", title: stepTitle(k), lookup });
+        await sleep(LOOKUP_MS);
+        if (run.cancelled) break;
+      }
+      updateMsg(mi, { shown: k + 1 });
+      showStep(mi, k, steps);
+      await sleep(STEP_MS);
+    }
+    updateMsg(mi, { shown: undefined });
+    replayRef.current = null;
+    setBusy("idle");
+    showStep(mi, interestingStep(steps), steps);
+  }
+
+  function playDemo(demo: Demo) {
+    const steps: Step[] = demo.steps.map(({ text, ...s }) => s);
+    const reply: Message = {
+      role: "assistant", text: demo.text, steps, charStep: charStepsFrom(demo.steps.map((s) => s.text)),
+      source: "recorded", status: statusText(demo.stopReason, steps.length),
+    };
+    const mi = thread.length + 1;
+    setThread((t) => [...t, { role: "user", text: demo.prompt }, reply]);
+    setSelected(null);
+    void replay(mi, reply);
+  }
+
+  async function sendLive(text: string) {
+    if (busy !== "idle" || !text.trim()) return;
     if (!apiKey) {
-      setNotice("Add your OpenRouter API key in the panel, then send again.");
-      askForKey();
+      setAttention(true);
+      document.getElementById("key-input")?.focus();
       return;
     }
-    setNotice(null);
     const user: Message = { role: "user", text };
     const conversation: Turn[] = [...thread, user].map(({ role, text }) => ({ role, text }));
     const { kept, trimmed } = fitContext(conversation);
     if (trimmed) user.trimmed = trimmed;
-    const reply: Message & { steps: Step[]; charStep: number[] } = { role: "assistant", text: "", steps: [], charStep: [], live: true };
+    const reply: Message & { steps: Step[]; charStep: number[] } = { role: "assistant", text: "", steps: [], charStep: [], source: "live", live: true, status: "Asking Jev…" };
+    const mi = thread.length + 1;
     const push = () => setThread((t) => [...t.slice(0, -1), { ...reply }]);
     setThread((t) => [...t, user, { ...reply }]);
     setSelected(null);
-    setRunning(true);
-    setInspector({ title: "Step 1: next word", step: null, loading: true });
+    setBusy("live");
+    setInspector({ kind: "loading", title: stepTitle(0) });
     setContextTokens(estimateTokens(kept));
     const controller = new AbortController();
     abortRef.current = controller;
@@ -137,56 +206,77 @@ export default function JevChat() {
     const result = await generate(kept, SETTINGS, (e) => {
       for (let c = Math.min(reply.text.length, e.text.length); c < e.text.length; c++) reply.charStep[c] = e.step;
       reply.text = e.text;
-      const step: Step = { label: e.label, top: e.top, confidence: e.confidence, latencyMs: e.latencyMs, inputTokens: e.inputTokens };
+      const step: Step = { label: e.label, top: e.top, confidence: e.confidence, latencyMs: e.latencyMs, inputTokens: e.inputTokens, lookup: e.lookup };
       reply.steps[e.step] = step;
+      reply.status = `Writing… step ${e.step + 1}`;
       setTokens((n) => n + e.inputTokens);
-      setInspector({ title: `Step ${e.step + 1}: next word`, step, loading: false });
+      setSelected({ msg: mi, step: e.step });
+      setInspector({ kind: "step", title: stepTitle(e.step), step });
       push();
     }, controller.signal);
 
     const ms = performance.now() - started;
-    const n = reply.steps.length;
-    const steps = `${n} step${n === 1 ? "" : "s"}, ${(ms / 1000).toFixed(1)} s`;
     reply.live = false;
     reply.error = result.stopReason === "error";
-    reply.meta =
-      result.stopReason === "end" ? `Jev decided it was done. ${steps}.`
-      : result.stopReason === "max_chars" ? `Stopped at the length limit. ${steps}.`
-      : result.stopReason === "error" ? (result.errorCode && ERROR_COPY[result.errorCode]) ?? `Something went wrong (${result.error}). Try again or start a new chat.`
-      : `You stopped it. ${steps}.`;
+    reply.status = result.stopReason === "error"
+      ? (result.errorCode && ERROR_COPY[result.errorCode]) ?? `Something went wrong (${result.error}). Try again or start a new chat.`
+      : statusText(result.stopReason, reply.steps.length, ms / 1000);
     push();
-    setInspector((i) => ({ ...i, loading: false }));
-    setRunning(false);
     abortRef.current = null;
+    setBusy("idle");
+    if (reply.steps.length) showStep(mi, interestingStep(reply.steps), reply.steps);
+    else setInspector({ kind: "idle" });
     if (TELEMETRY) {
       // Numbers and one enum only: no prompt, no reply, no key.
-      const payload = { event: "reply", steps: n, inputTokens: result.inputTokens, ms: Math.round(ms), stopReason: result.stopReason, lookups: reply.steps.filter((s) => fromDictionary(s.label)).length };
+      const payload = { event: "reply", steps: reply.steps.length, inputTokens: result.inputTokens, ms: Math.round(ms), stopReason: result.stopReason, lookups: reply.steps.filter((s) => fromDictionary(s.label)).length };
       try { navigator.sendBeacon("/api/t", JSON.stringify(payload)); } catch {}
     }
+  }
+
+  function example(demo: Demo) {
+    if (busy !== "idle") return;
+    if (apiKey) void sendLive(demo.prompt);
+    else playDemo(demo);
+  }
+
+  function stop() {
+    if (busy === "live") abortRef.current?.abort();
+    if (busy === "replay" && replayRef.current) replayRef.current.cancelled = true;
   }
 
   function submit() {
     const text = input;
     setInput("");
     if (inputRef.current) inputRef.current.style.height = "auto";
-    send(text);
-  }
-
-  function inspect(mi: number, ci: number) {
-    const m = thread[mi];
-    const si = m.charStep?.[ci] ?? ci;
-    const step = m.steps?.[si];
-    if (!step) return;
-    setSelected({ msg: mi, char: ci });
-    setInspector({ title: `Step ${si + 1}: next word`, step, loading: false });
+    void sendLive(text);
   }
 
   function newChat() {
+    stop();
     setThread([]);
     setSelected(null);
-    setInspector(IDLE);
+    setInspector({ kind: "idle" });
+    setContextTokens(0);
     inputRef.current?.focus();
   }
+
+  function saveKey(key: string) {
+    setApiKey(key);
+    store.set("jev.openrouterKey", key);
+    setAttention(false);
+  }
+  function forgetKey() {
+    setApiKey("");
+    store.set("jev.openrouterKey", "");
+  }
+
+  // Desktop hover previews a step without changing the selection.
+  const view: InspectorState =
+    hover && busy === "idle" && thread[hover.msg]?.steps?.[hover.step]
+      ? { kind: "step", title: stepTitle(hover.step), step: thread[hover.msg].steps![hover.step] }
+      : inspector;
+  const replies = thread.filter((m) => m.role === "assistant").length;
+  const firstFinished = thread.findIndex((m) => m.role === "assistant" && m.steps?.length && !m.live && m.shown === undefined && !m.error);
 
   return (
     <div className="app">
@@ -194,9 +284,6 @@ export default function JevChat() {
         <div className="brand">
           <h1>Jev as LLM</h1>
           <p>Jev is a judgment model that was never trained to write. This page makes it write anyway, one word at a time.</p>
-        </div>
-        <div className="spend" title="Input tokens sent to Jev from this browser">
-          <b>{tokens.toLocaleString()}</b> tokens used
         </div>
       </header>
 
@@ -206,175 +293,122 @@ export default function JevChat() {
             {thread.length === 0 ? (
               <div className="empty">
                 <h2>Ask Jev something.</h2>
-                <p>Jev answers typed questions with probabilities. This page keeps asking it which word should come next until it picks stop.</p>
-                {ready && !apiKey && (
-                  <div className="keynote">
-                    This demo runs in your browser and uses your own OpenRouter API key.{" "}
-                    <button className="btn link" onClick={askForKey}>Add your key</button>
-                  </div>
-                )}
+                <p>
+                  Jev answers typed questions with probabilities. This page keeps asking it which word should come next until it picks stop.
+                  {ready && !apiKey && " Try an example below. Each one replays a real run we recorded earlier."}
+                </p>
                 <div className="suggestions">
-                  {PRESETS.map((p) => (
-                    <button key={p.id} className="suggestion" onClick={() => send(p.prompt)}>{p.prompt}</button>
+                  {DEMOS.map((d) => (
+                    <button key={d.id} className="suggestion" disabled={busy !== "idle"} onClick={() => example(d)}>{d.prompt}</button>
                   ))}
                 </div>
               </div>
             ) : (
               <div className="turns">
-                {thread.map((m, mi) => (
-                  <MessageView key={mi} m={m} selectedChar={selected?.msg === mi ? selected.char : null} onPick={(ci) => inspect(mi, ci)} />
-                ))}
+                {thread.map((m, mi) => {
+                  if (m.role === "user") {
+                    return (
+                      <div key={mi} className="turn">
+                        {m.trimmed ? <div className="note">{m.trimmed} earlier message{m.trimmed > 1 ? "s" : ""} trimmed from Jev&apos;s context</div> : null}
+                        <div className="msg user">{m.text}</div>
+                      </div>
+                    );
+                  }
+                  const shownText = m.shown === undefined ? m.text : [...m.text].filter((_, c) => (m.charStep?.[c] ?? 0) < m.shown!).join("");
+                  const lookups = new Set((m.steps ?? []).flatMap((s, i) => (s.lookup ? [i] : [])));
+                  const writing = m.live || m.shown !== undefined;
+                  return (
+                    <div key={mi} className={`msg assistant${writing ? " live" : ""}`}>
+                      <div className="reply">
+                        {writing && !shownText ? (
+                          <span className="skeleton line" />
+                        ) : (
+                          <ReplyText
+                            tokens={tokenize(shownText, m.charStep ?? [], lookups)}
+                            selectedStep={selected?.msg === mi ? selected.step : null}
+                            onSelect={(si) => select(mi, si)}
+                            onHover={mobile ? undefined : (si) => setHover(si === null ? null : { msg: mi, step: si })}
+                          />
+                        )}
+                        {writing && shownText && <span className="caret" />}
+                      </div>
+                      <div className={`meta${m.error ? " error" : ""}`}>
+                        {m.source === "recorded" && <span className="tag">recorded run</span>}
+                        {m.source === "live" && !writing && !m.error && <span className="tag">live</span>}
+                        <span>{m.shown !== undefined ? "Replaying…" : m.status}</span>
+                        {!writing && !m.error && (m.steps?.length ?? 0) > 0 && (
+                          <button className="btn link" disabled={busy !== "idle"} onClick={() => void replay(mi, m)}>▶ Replay</button>
+                        )}
+                      </div>
+                      {mi === firstFinished && !hintSeen && busy === "idle" && (
+                        <div className="hint-once">Tap any word to see what else Jev considered.</div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
 
           <div className="composer">
             <div className="composer-inner">
-              <div className="field">
-                <textarea
-                  ref={inputRef}
-                  rows={1}
-                  value={input}
-                  placeholder="Ask Jev something"
-                  aria-label="Message to Jev"
-                  onChange={(e) => {
-                    setInput(e.target.value);
-                    e.target.style.height = "auto";
-                    e.target.style.height = Math.min(e.target.scrollHeight, 180) + "px";
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
-                  }}
-                />
-                {running && <button className="btn quiet" onClick={() => abortRef.current?.abort()}>Stop</button>}
-                <button className="btn primary" disabled={running} onClick={submit}>Send</button>
-              </div>
-              {notice && <div className="notice" role="status">{notice}</div>}
-              <div className="below">
-                <select
-                  className="examples"
-                  aria-label="Example prompts"
-                  value=""
-                  disabled={running}
-                  onChange={(e) => { const p = PRESETS.find((x) => x.id === e.target.value); if (p) send(p.prompt); }}
-                >
-                  <option value="">Try an example</option>
-                  {PRESETS.map((p) => <option key={p.id} value={p.id}>{p.prompt}</option>)}
-                </select>
-                <button className="btn link" disabled={running} onClick={newChat}>New chat</button>
-                <span className="spacer" />
-                <span>Enter sends.</span>
-              </div>
+              {/* Key field from the first paint: most visitors arrive without a key. */}
+              {!apiKey ? (
+                <KeyEntry onSave={saveKey} attention={attention} />
+              ) : (
+                <>
+                  <div className="field">
+                    <textarea
+                      ref={inputRef}
+                      className="field-input"
+                      rows={1}
+                      value={input}
+                      placeholder="Ask Jev something"
+                      aria-label="Message to Jev"
+                      onChange={(e) => {
+                        setInput(e.target.value);
+                        e.target.style.height = "auto";
+                        e.target.style.height = Math.min(e.target.scrollHeight, 180) + "px";
+                      }}
+                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
+                    />
+                    {busy === "idle"
+                      ? <button className="btn primary slot" onClick={submit} disabled={!input.trim()}>Send</button>
+                      : <button className="btn quiet slot" onClick={stop}>Stop</button>}
+                  </div>
+                  <div className="below">
+                    <button className="btn link" disabled={busy !== "idle" || thread.length === 0} onClick={newChat}>New chat</button>
+                    <span className="spacer" />
+                    <span>Enter sends. Shift+Enter adds a line.</span>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </main>
 
         <aside aria-label="Inspector">
-          <section ref={keySectionRef} className={attention ? "attention" : undefined}>
-            <h2>Your OpenRouter API key</h2>
-            <div className="keyrow">
-              <input
-                ref={keyInputRef}
-                type="password"
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="sk-or-..."
-                aria-label="OpenRouter API key"
-                value={keyDraft}
-                onChange={(e) => setKeyDraft(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") saveKey(); }}
-              />
-              <button className="btn quiet" onClick={saveKey}>Save</button>
-            </div>
-            <div className="hint">
-              {apiKey ? (
-                <>Saved in this browser. <button className="btn link" onClick={forgetKey}>Forget key</button></>
-              ) : (
-                <><a href="https://openrouter.ai/workspaces/default/keys" target="_blank" rel="noopener noreferrer">Create a key on OpenRouter</a> and paste it here. A reply usually costs less than a cent.</>
-              )}
-            </div>
-            <div className="hint trust">
-              <strong>Your key never reaches our server.</strong> Everything runs in your browser, which sends your key straight to openrouter.ai, where Jev runs.{" "}
-              {TELEMETRY
-                ? "This site only gets an anonymous usage count with step and token numbers. That count never includes your text or your key."
-                : "Nothing else gets sent anywhere."}
-              <details>
-                <summary>How to check</summary>
-                Open your browser&apos;s developer tools, switch to the Network tab and send a message. Your key only shows up in requests to openrouter.ai. The site&apos;s Content-Security-Policy header also blocks the page from sending data anywhere except openrouter.ai and this site.
-              </details>
-            </div>
+          {apiKey && (
+            <section className="keyline">
+              Your OpenRouter key is saved in this browser. <button className="btn link" onClick={forgetKey}>Forget key</button>
+            </section>
+          )}
+          <section className="insp-section">
+            <h2>{inspectorTitle(view)}</h2>
+            <Inspector state={view} />
           </section>
-
-          <section>
-            <h2>{inspector.title}</h2>
-            <InspectorView inspector={inspector} />
-          </section>
-
-          <section>
-            <h2>Context</h2>
-            <div className="hint">
-              {contextTokens === null
-                ? "Measured when you send a message."
-                : `About ${contextTokens.toLocaleString()} of ${CONTEXT_BUDGET.toLocaleString()} tokens used by this conversation.`}
-            </div>
-            <div className="meter"><div style={{ width: `${Math.min(100, ((contextTokens ?? 0) / CONTEXT_BUDGET) * 100)}%` }} /></div>
-          </section>
+          {contextTokens > CONTEXT_BUDGET * 0.6 && (
+            <section className="hint">
+              This conversation uses about {contextTokens.toLocaleString()} of Jev&apos;s {CONTEXT_BUDGET.toLocaleString()}-token context. After that, the page drops the oldest messages.
+            </section>
+          )}
+          <footer className="asidefoot">{replies} {replies === 1 ? "reply" : "replies"} · {tokens.toLocaleString()} tokens used</footer>
         </aside>
       </div>
+
+      <BottomSheet open={mobile && sheetOpen} title={inspectorTitle(inspector)} onClose={() => setSheetOpen(false)}>
+        <Inspector state={inspector} />
+      </BottomSheet>
     </div>
-  );
-}
-
-function MessageView({ m, selectedChar, onPick }: { m: Message; selectedChar: number | null; onPick: (ci: number) => void }) {
-  return (
-    <>
-      {m.trimmed ? <div className="note">{m.trimmed} earlier message{m.trimmed > 1 ? "s" : ""} trimmed from Jev&apos;s context</div> : null}
-      <div className={`msg ${m.role}${m.live ? " live" : ""}`}>
-        {m.role === "assistant" && m.steps ? (
-          <>
-            {m.live && !m.text ? (
-              <><span className="skeleton" style={{ width: 220 }} /><span className="skeleton" style={{ width: 140 }} /></>
-            ) : (
-              // Every character is clickable: it shows the step that produced it.
-              [...m.text].map((c, i) => (
-                <span key={i} className={`ch${selectedChar === i ? " sel" : ""}`} onClick={() => onPick(i)}>{c}</span>
-              ))
-            )}
-            {m.live && m.text && <span className="caret" />}
-            {m.meta && <span className={`meta${m.error ? " error" : ""}`}>{m.meta}</span>}
-          </>
-        ) : (
-          m.text
-        )}
-      </div>
-    </>
-  );
-}
-
-function InspectorView({ inspector }: { inspector: Inspector }) {
-  if (inspector.loading) {
-    return <div className="bars">{[72, 48, 34, 22].map((w) => <span key={w} className="skeleton" style={{ width: `${w}%` }} />)}</div>;
-  }
-  const step = inspector.step;
-  if (!step) {
-    return <div className="hint">At each step Jev gives every candidate word a probability, and the top ones show up here while it writes. Click any word in a reply to see the step behind it.</div>;
-  }
-  // A dictionary word was chosen through the "look up" option, so that bar is the pick.
-  const pickLabel = fromDictionary(step.label) ? "<OTHER>" : step.label;
-  return (
-    <>
-      <div className="bars">
-        {step.top.slice(0, 8).map(({ label, p }) => (
-          <div key={label} className={`bar${label === pickLabel ? " pick" : ""}`}>
-            <span className="lbl">{show(label)}</span>
-            <span className="track"><span className="fill" style={{ width: `${Math.max(p * 100, 1).toFixed(1)}%` }} /></span>
-            <span className="pct">{(p * 100).toFixed(0)}%</span>
-          </div>
-        ))}
-      </div>
-      <div className="stat">
-        Picked &quot;{show(step.label)}&quot;{fromDictionary(step.label) ? " from the dictionary" : ""}. Confidence {step.confidence.toFixed(2)}, {step.latencyMs.toLocaleString()} ms, {step.inputTokens.toLocaleString()} tokens.
-      </div>
-    </>
   );
 }
