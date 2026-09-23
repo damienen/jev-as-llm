@@ -5,12 +5,14 @@
 // only request to this site is an anonymous usage count (/api/t, numbers only).
 
 import { useEffect, useRef, useState } from "react";
-import { CONTEXT_BUDGET, DEFAULTS, MAX_CHARS, estimateTokens, fitContext, generate, normalizeSettings, type Candidate, type Settings } from "@/lib/decode";
+import { CONTEXT_BUDGET, DEFAULTS, estimateTokens, fitContext, generate, type Candidate } from "@/lib/decode";
 import { setProvider, type JevErrorCode, type Turn } from "@/lib/jev";
 import { PRESETS } from "@/lib/presets";
 import { preloadVocabulary } from "@/lib/vocab";
 
 const TELEMETRY = process.env.NEXT_PUBLIC_TELEMETRY !== "off";
+/** Fixed: temperature 0 (always Jev's top choice), replies capped at 300 characters, judge off. */
+const SETTINGS = DEFAULTS;
 
 interface Step { label: string; top: Candidate[]; confidence: number; latencyMs: number; inputTokens: number }
 interface Message {
@@ -49,7 +51,6 @@ export default function JevChat() {
   const [apiKey, setApiKey] = useState("");
   const [keyDraft, setKeyDraft] = useState("");
   const [attention, setAttention] = useState(false);
-  const [settings, setSettings] = useState<Settings>(DEFAULTS);
   const [thread, setThread] = useState<Message[]>([]);
   const [tokens, setTokens] = useState(0);
   const [contextTokens, setContextTokens] = useState<number | null>(null);
@@ -70,7 +71,7 @@ export default function JevChat() {
     const key = store.get("jev.openrouterKey", "");
     setApiKey(key);
     setKeyDraft(key);
-    setSettings({ ...normalizeSettings(store.get<Partial<Settings>>("jev.settings", {})), rerank: false }); // judge is off (see EXPERIMENT_LOG.md)
+    try { localStorage.removeItem("jev.settings"); } catch {} // settings are fixed now
     setThread(store.get<Message[]>("jev.thread", []).map((m) => ({ ...m, live: false })));
     setTokens(store.get("jev.tokens", 0));
     setReady(true);
@@ -86,10 +87,6 @@ export default function JevChat() {
     store.set("jev.thread", thread);
     store.set("jev.tokens", tokens);
   }, [ready, running, thread, tokens]);
-
-  useEffect(() => {
-    if (ready) store.set("jev.settings", settings);
-  }, [ready, settings]);
 
   useEffect(() => {
     const el = threadRef.current;
@@ -137,7 +134,7 @@ export default function JevChat() {
     abortRef.current = controller;
 
     const started = performance.now();
-    const result = await generate(kept, settings, (e) => {
+    const result = await generate(kept, SETTINGS, (e) => {
       for (let c = Math.min(reply.text.length, e.text.length); c < e.text.length; c++) reply.charStep[c] = e.step;
       reply.text = e.text;
       const step: Step = { label: e.label, top: e.top, confidence: e.confidence, latencyMs: e.latencyMs, inputTokens: e.inputTokens };
@@ -163,7 +160,7 @@ export default function JevChat() {
     abortRef.current = null;
     if (TELEMETRY) {
       // Numbers and one enum only: no prompt, no reply, no key.
-      const payload = { event: "reply", steps: n, inputTokens: result.inputTokens, ms: Math.round(ms), stopReason: result.stopReason, lookups: reply.steps.filter((s) => fromDictionary(s.label)).length, temperature: settings.temperature, maxChars: settings.maxChars };
+      const payload = { event: "reply", steps: n, inputTokens: result.inputTokens, ms: Math.round(ms), stopReason: result.stopReason, lookups: reply.steps.filter((s) => fromDictionary(s.label)).length };
       try { navigator.sendBeacon("/api/t", JSON.stringify(payload)); } catch {}
     }
   }
@@ -311,26 +308,6 @@ export default function JevChat() {
           <section>
             <h2>{inspector.title}</h2>
             <InspectorView inspector={inspector} />
-          </section>
-
-          <section>
-            <h2>Settings</h2>
-            <label className="ctl">
-              Temperature
-              <input type="range" min={0} max={2} step={0.1} value={settings.temperature}
-                onChange={(e) => setSettings((s) => normalizeSettings({ ...s, temperature: Number(e.target.value) }))} />
-              <span className="val">{settings.temperature}</span>
-            </label>
-            <label className="ctl">
-              Max characters
-              <input type="range" min={10} max={MAX_CHARS} step={10} value={settings.maxChars}
-                onChange={(e) => setSettings((s) => normalizeSettings({ ...s, maxChars: Number(e.target.value) }))} />
-              <span className="val">{settings.maxChars}</span>
-            </label>
-            <div className="help">
-              Jev picks each word from about 250 common ones. For anything rarer it searches a 75,000-word dictionary.
-              {settings.temperature > 0 ? " Temperature above 0 adds randomness." : " At 0 it always takes its top choice."}
-            </div>
           </section>
 
           <section>

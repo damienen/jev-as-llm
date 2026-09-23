@@ -3,7 +3,7 @@
 // Project > Logs, filter "jev-telemetry"). Any other field, including any
 // text or key sent by mistake, is dropped here.
 
-const NUMBERS = ["steps", "inputTokens", "ms", "lookups", "temperature", "maxChars"] as const;
+const NUMBERS = ["steps", "inputTokens", "ms", "lookups"] as const;
 const STOP_REASONS = new Set(["end", "max_chars", "aborted", "error"]);
 
 export async function POST(request: Request) {
