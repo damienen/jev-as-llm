@@ -35,6 +35,7 @@ Your browser (the whole app runs here)                      OpenRouter
 - Your key is stored in your browser and sent only to `openrouter.ai`.
 - The site's `Content-Security-Policy` header (`connect-src 'self' https://openrouter.ai`) makes the browser refuse to send data anywhere else. You can check it in your browser's developer tools.
 - `/api/t` receives the step count, token count, time, number of lookups and stop reason for each live reply. It keeps nothing else, so no prompt, reply or key. Set `NEXT_PUBLIC_TELEMETRY=off` to switch it off.
+- Page views are counted with [Vercel Web Analytics](https://vercel.com/docs/analytics), which uses no cookies and runs from this site's own `/_vercel/insights` path. It sees which page was visited, not your key or your messages.
 - Why OpenRouter and not TypeSafe directly? TypeSafe's API refuses requests from other websites (CORS). OpenRouter serves the same Jev model with the same request format and accepts browser requests.
 
 ## What we learned
