@@ -402,7 +402,13 @@ export default function JevChat() {
               This conversation uses about {contextTokens.toLocaleString()} of Jev&apos;s {CONTEXT_BUDGET.toLocaleString()}-token context. After that, the page drops the oldest messages.
             </section>
           )}
-          <footer className="asidefoot">{replies} {replies === 1 ? "reply" : "replies"} · {tokens.toLocaleString()} tokens used</footer>
+          <footer className="asidefoot">
+            <div>{replies} {replies === 1 ? "reply" : "replies"} · {tokens.toLocaleString()} tokens used</div>
+            <div className="about">
+              <a href="https://github.com/damienen/jev-as-llm" target="_blank" rel="noopener noreferrer">Source and write-up on GitHub</a>.
+              An independent experiment, not affiliated with TypeSafe or OpenRouter.
+            </div>
+          </footer>
         </aside>
       </div>
 

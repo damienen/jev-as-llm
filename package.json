@@ -1,7 +1,7 @@
 {
   "name": "jev-as-llm",
   "version": "1.0.0",
-  "description": "Jev (TypeSafe System One) forced to chat like an LLM, one character at a time",
+  "description": "TypeSafe's Jev, a judgment model that was never trained to write, made to chat one word at a time. Runs in the browser on your own OpenRouter key.",
   "scripts": {
     "dev": "next dev",
     "eval": "tsx eval/run.ts",
@@ -13,7 +13,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "devDependencies": {
     "@types/node": "^26.6.2",
     "@types/react": "^19.3.0",
@@ -32,5 +32,11 @@
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },
-  "type": "module"
+  "type": "module",
+  "private": "true",
+  "homepage": "https://jev-as-llm.vercel.app",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/damienen/jev-as-llm.git"
+  }
 }

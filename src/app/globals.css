@@ -122,7 +122,10 @@ aside h2 { margin: 0 0 14px; font-size: 14px; font-weight: 600; letter-spacing: 
 .bar .pct { font: 12px var(--mono); color: var(--faint); text-align: right; font-variant-numeric: tabular-nums; }
 .stat { margin-top: 14px; min-height: calc(2 * 1.5em); font-size: 13px; line-height: 1.5; color: var(--muted); font-variant-numeric: tabular-nums; }
 .keyline { font-size: 13px; color: var(--muted); }
-.asidefoot { margin-top: auto; font: 12px var(--mono); color: var(--faint); }
+.asidefoot { margin-top: auto; font: 12px var(--mono); color: var(--faint); display: grid; gap: 8px; }
+.asidefoot .about { font: 12.5px/1.5 var(--sans); }
+.asidefoot a { color: var(--muted); text-underline-offset: 3px; }
+.asidefoot a:hover { color: var(--ink); }
 .hint { font-size: 13.5px; color: var(--muted); }
 .hint a { color: var(--accent); text-underline-offset: 3px; }
 

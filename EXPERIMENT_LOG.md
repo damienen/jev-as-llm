@@ -2,7 +2,9 @@
 
 Jev (TypeSafe's System One model, `jev-1.13`) answers typed questions (Choice / Score / Noul) with probabilities. The docs say it "is not trained to generate text". The question: how close can we get to an LLM chat by composing those judgments?
 
-All transcripts are in `results/`, and every generation (settings, per-step distributions, token usage) is in `runs/*.jsonl`. Six fixed probe prompts (`src/presets.ts`) are used throughout: greeting, capital of Japan, count 1–5, two-line sea poem, Python square function, "is the sun a star?".
+**How this log was made.** I built this over two days as a pairing session with Claude Code (Anthropic's coding agent). I set the direction and made the calls; Claude wrote most of the code, ran the experiments and kept this log as we went. So "we" below means the two of us, and "I" marks decisions that were mine. I left the failed attempts in on purpose, since they're most of the story.
+
+The transcripts quoted below are in `results/`. The raw per-step traces (`runs/*.jsonl`) stayed local and aren't in the repo. File paths in each section are as they were at the time: many of the early scripts and modules were deleted in the cleanup, and the rest moved to `src/lib/` in the Next.js rewrite. Six fixed probe prompts are used throughout (later folded into `eval/cases.ts`): greeting, capital of Japan, count 1 to 5, two-line sea poem, Python square function, "is the sun a star?".
 
 Cost reference: Jev charges $0.042 per million input tokens, and output is free.
 
@@ -39,11 +41,11 @@ Results (`results/greedy.md`, `results/beam-pure-aided.md`):
 
 About 300 ms and 2.1k tokens per character. Beam search (k=3) gave the same attractors.
 
-**Diagnosis:** Jev answers "which character fits this reply?", not "which character comes next at this position". In pure mode a trailing space is invisible, so it keeps picking `SPACE`. In aided mode it loops on word-initial letters. It does know when a reply is complete (`<END>` at 0.88–1.00).
+**Diagnosis:** Jev answers "which character fits this reply?", not "which character comes next at this position". In pure mode a trailing space is invisible, so it keeps picking `SPACE`. In aided mode it loops on word-initial letters. It does know when a reply is complete (`<END>` at 0.88-1.00).
 
 ## Attempt 2: tell Jev the truth (`framed`), make whitespace visible (`visible`)
 
-This was the user's idea: explain that Jev is called once per character to spell out the best reply. `visible` also draws spaces as `␣` / `↵` and adds a character count.
+This was my idea: explain that Jev is called once per character to spell out the best reply. `visible` also draws spaces as `␣` / `↵` and adds a character count.
 
 Results (`results/modes-framed-visible.md`):
 - **framed:** first real word (`Hi`), clean `1,2,3,4,5`, then back to spaces.
@@ -88,7 +90,7 @@ At each word boundary, one Choice picks the next *word* from about 250 candidate
 - Fact: `The`→`capital` 0.66→`is` 0.65. At `…Japan is`, `<OTHER>` 0.60 (Tokyo isn't listed). After `…Tokyo` → `.` 0.72, then `<END>` 0.98.
 - Greeting: `Hi`→`I'm`→`good`/`well`→`.`/END.
 - Poem: `The`→`sea` 0.53→`is` 0.80.
-- About 5–7k tokens per *word*, which is cheaper than character mode.
+- About 5-7k tokens per *word*, which is cheaper than character mode.
 
 **Spelling unlisted words letter by letter** (`scripts/spell-probe.ts`) fails: `T` 0.85 is correct, then `Taia`. For France it gave `CAP`.
 
@@ -96,7 +98,7 @@ At each word boundary, one Choice picks the next *word* from about 250 candidate
 
 ### Attempt 6 result: word decoder v1 (`results/words-v1.md`)
 
-`src/wordgen.ts` + `runWords` in `src/decode.ts`. Each step is one Choice over about 250 tokens: conversation words, punctuation, the digits 1–10, about 230 common words, plus `<OTHER>` and `<END>`. `<OTHER>` goes to a 38k-word dictionary (SCOWL plus 250 countries and capitals). Jev narrows it by first letters, with example words for each group, until a bucket is ≤250 words, then picks the word. Code owns spacing and sentence capitalisation.
+`src/wordgen.ts` + `runWords` in `src/decode.ts`. Each step is one Choice over about 250 tokens: conversation words, punctuation, the digits 1-10, about 230 common words, plus `<OTHER>` and `<END>`. `<OTHER>` goes to a 38k-word dictionary (SCOWL plus 250 countries and capitals). Jev narrows it by first letters, with example words for each group, until a bucket is ≤250 words, then picks the word. Code owns spacing and sentence capitalisation.
 
 | Prompt | Reply |
 |---|---|
@@ -107,12 +109,12 @@ At each word boundary, one Choice picks the next *word* from about 250 candidate
 | code | `Def function square (x:): return x * x` |
 | yes/no | `Yes` |
 
-About **$0.012 for all six** (vs $0.14–0.47 for the character variants), and 1–10 s per reply. **This is the first version that reads like an LLM.**
+About **$0.012 for all six** (vs $0.14-0.47 for the character variants), and 1-10 s per reply. **This is the first version that reads like an LLM.**
 
 ## Attempt 7: rerank, lowercase, guards (`results/words-v2-lowercase.md`)
 
 - **Judge rerank:** the word Choice's top candidates (6, later 8) plus `<END>` are each scored as a whole reply by a Score question in one request. The winner is judge score + 0.3·log p.
-- **Lowercase only** (user decision): capitalisation caused more trouble (`Def`, `CAPITAL`) than it was worth.
+- **Lowercase only** (my call): capitalisation caused more trouble (`Def`, `CAPITAL`) than it was worth.
 - **Bug: an endless loop.** A second `NEWLINE` after a line break left the reply unchanged, so the character cap never triggered. One poem ran 172 steps (about $0.10). Fixes: a hard step cap, and candidates that don't grow the reply are dropped.
 - `a` → `an` agreement is done by code.
 
@@ -130,8 +132,8 @@ About **$0.012 for all six** (vs $0.14–0.47 for the character variants), and 1
 
 - First run (`results/words-holdout-v2.md`): sky, 2+2 and France (partly) were OK. The rest broke: `an an apricot`, `the. the. the.`, `you're am glad`.
 - Grammar rules in code (an article is never followed by punctuation or another article), `<END>` always judged, rerank widened to 8 (`results/words-holdout-v3.md`): no better.
-- **Bug found:** a shell heredoc turned `/\s+/` into `/s+/`. "Last word" was really the text after the last letter *s*, so the repetition and article checks had silently never worked. After fixing it, plus reducing punctuation to `. , ! ? :` and line break (**user decision**: `- * ( ) "` produced junk like `- a, -. -. -.`), see `results/words-v3.md` and `results/words-holdout-v4.md`.
-- **Diagnosis from the traces:** Jev *wants* specific words (`<OTHER>` at 0.3–0.9), but the dictionary lookup failed. Narrowing letter by letter hits the same weakness as character mode: `s…`→`se…`→`sen…` missed "seine", and `f…`→`fr…`→`fru…` echoed "fruits". The "other word" option text also contained the word *other*, which leaked into replies. It was reworded.
+- **Bug found:** a shell heredoc turned `/\s+/` into `/s+/`. "Last word" was really the text after the last letter *s*, so the repetition and article checks had silently never worked. After fixing it, plus reducing punctuation to `. , ! ? :` and line break (**my call**: `- * ( ) "` produced junk like `- a, -. -. -.`), see `results/words-v3.md` and `results/words-holdout-v4.md`.
+- **Diagnosis from the traces:** Jev *wants* specific words (`<OTHER>` at 0.3-0.9), but the dictionary lookup failed. Narrowing letter by letter hits the same weakness as character mode: `s…`→`se…`→`sen…` missed "seine", and `f…`→`fr…`→`fru…` echoed "fruits". The "other word" option text also contained the word *other*, which leaked into replies. It was reworded.
 
 ## Attempt 9: fan-out dictionary lookup (`results/words-holdout-v5-fanout.md`)
 
@@ -140,7 +142,7 @@ About **$0.012 for all six** (vs $0.14–0.47 for the character variants), and 1
 2. Every dictionary word under those letters (up to about 9k for `s`) is split into lists of 250 bare labels, asked as **parallel Choices**, 10 lists per request, with requests run in parallel. Probe result: `seine` = 0.99 out of 8,742 candidates in one round trip.
 3. A final Choice among the per-list winners, with each option showing the reply continuing.
 
-About 30–150k tokens per lookup ($0.001–0.006). Only triggered when `<OTHER>` ≥ 0.15. The vocabulary grew to 75k words (SCOWL tiers 10–60 plus countries and capitals). The first attempt hit a 64k-token request limit (`max_tokens_exceeded`), and client errors are no longer retried.
+About 30-150k tokens per lookup ($0.001-0.006). Only triggered when `<OTHER>` ≥ 0.15. The vocabulary grew to 75k words (SCOWL tiers 10-60 plus countries and capitals). The first attempt hit a 64k-token request limit (`max_tokens_exceeded`), and client errors are no longer retried.
 
 Held-out results: `apple, banana and orange.`, `the capital is paris and the river is seine.`, `the cats that have a calico are only she cats.` Two small fixes followed: no pronoun after an article (`an i`, `the it's`), and chat staples (`welcome`, `anytime`, …) added to the common list.
 
@@ -167,13 +169,13 @@ Word decoder with rerank and fan-out lookup, greedy (T=0), lowercase.
 | *held-out:* Capital of France and its river? | `the capital is paris and the river is the seine.` | ✓ |
 | *held-out:* Thanks for your help! | `welcome` | ✓ |
 
-**12 of 14 reasonable.** Replies take 1–20 s and cost $0.0005–0.04 each (mostly dictionary lookups).
+**12 of 14 reasonable.** Replies take 1-20 s and cost $0.0005-0.04 each (mostly dictionary lookups).
 
 ## What we learned
 
 1. **Jev can't generate text character by character.** Framing, visible whitespace, candidate-reply options, dictionary hints and a judge all failed at the same point: choosing *which word comes next* one letter at a time. It can continue a word already underway.
 2. **Jev is good at comparing distinct, readable alternatives.** A Choice whose options are the reply continued by one *whole word* reads like an LLM. It knows facts (Tokyo, Paris, Seine, carnivores) and knows when a reply is finished (`<END>` at 0.9+).
-3. **Jev is an excellent judge of whole replies** (Score 0–4), which makes it a good reranker. It reads past whitespace and stray symbols, though, so typography has to live in code.
+3. **Jev is an excellent judge of whole replies** (Score 0-4), which makes it a good reranker. It reads past whitespace and stray symbols, though, so typography has to live in code.
 4. **Anything spelled, counted or positional fails**, as the Jev docs warn: letter-by-letter narrowing, spelling, and `candidates[i]` indirection among near-identical strings (all scores flattened to ~2.4).
 5. **Fan-out is the key trick.** One request can hold dozens of independent Choices, so a 9k-word dictionary bucket is searched in one round trip.
 6. **Code owns the mechanics:** spacing, a/an agreement, "an article is followed by a word", no-progress and repetition guards, step caps. Jev owns the semantics.
@@ -188,7 +190,7 @@ Word decoder with rerank and fan-out lookup, greedy (T=0), lowercase.
 
 ## Cost
 
-About **$2.35** in total, including all failed variants. The character-level attempts were the expensive part ($0.14–0.47 per six-prompt round). A word-decoder round on six prompts costs $0.01–0.12.
+About **$2.35** in total, including all failed variants. The character-level attempts were the expensive part ($0.14-0.47 per six-prompt round). A word-decoder round on six prompts costs $0.01-0.12.
 
 ## Cleanup (after the experiment)
 
@@ -217,21 +219,21 @@ There are 20 prompts in `eval/cases.ts` (6 tuning, 14 held out). Each has automa
 - **Both configs fail the same four prompts**, for two reasons:
   - Missing vocabulary: Shakespeare, Jupiter and hola are not in the dictionary.
   - Model error: `they make beeswax` / `a beehive` instead of honey.
-- **Verdict:** a tie on the strict score, at about 1.7× the cost and 2× the time. The judge is worth keeping only if its loops are fixed. One run of 20 prompts is noisy; a 1–2 prompt difference is not significant.
+- **Verdict:** a tie on the strict score, at about 1.7× the cost and 2× the time. The judge is worth keeping only if its loops are fixed. One run of 20 prompts is noisy; a 1-2 prompt difference is not significant.
 - The first report counted "correct" without "clean", so looping replies still passed. The runner now reports **pass = correct and clean** as the headline.
 
 ## Decisions after the eval
 
-- **Judge off by default** (user decision): it costs about 1.7× as much and takes 2× as long for no net gain. The code stays, so it can be re-evaluated (`npm run eval -- judge,nojudge`) once the loop problem is fixed. The UI no longer offers it.
-- **Bring your own key** (user decision): the website uses each visitor's TypeSafe key, sent per request and never logged. The server's key is only used for web requests with `SERVER_KEY_FALLBACK=1`.
-- The TypeSafe account used for this experiment ran out of credits at this point (`402 … no available TypeSafe API credits`). Total spend was about $3.2, which suggests the account had less credit than the $5 budget.
+- **Judge off by default** (my call): it costs about 1.7× as much and takes 2× as long for no net gain. The code stays, so it can be re-evaluated (`npm run eval -- judge,nojudge`) once the loop problem is fixed. The UI no longer offers it.
+- **Bring your own key** (my call): the website uses each visitor's TypeSafe key, sent per request and never logged. The server's key is only used for web requests with `SERVER_KEY_FALLBACK=1`.
+- The TypeSafe account used for this experiment ran out of credits at this point (`402 … no available TypeSafe API credits`), after about $3.2 of total spend.
 
 ## Browser-only rewrite: the key never touches our server
 
-**Goal (user decision):** visitors' keys must never reach a server of ours, and that should be easy to check. Telemetry is allowed, but only anonymous counts.
+**Goal (my call):** visitors' keys must never reach a server of ours, and that should be easy to check. Telemetry is allowed, but only anonymous counts.
 
 - **TypeSafe can't be called from a browser.** A CORS preflight to `api.typesafe.ai/v1/systemone` returns "Disallowed CORS origin" for every origin tried: a hosted site, `localhost`, even `console.`/`docs.typesafe.ai`. The SDK also refuses to run in a browser without `dangerouslyAllowBrowser`.
-- **OpenRouter can** (the user's idea). It serves Jev at `POST https://openrouter.ai/api/alpha/decisions` (model `typesafe/jev-1.13`) with the same request and response body as TypeSafe, and its preflight returns `Access-Control-Allow-Origin: *`. The user's other project (jev-slop-alarm) already uses it this way.
+- **OpenRouter can** (my idea). It serves Jev at `POST https://openrouter.ai/api/alpha/decisions` (model `typesafe/jev-1.13`) with the same request and response body as TypeSafe, and its preflight returns `Access-Control-Allow-Origin: *`. Another project of mine already calls it this way from the browser.
 - **Result:**
   - The decoder runs entirely in the browser (`web/app.ts` bundles `src/`). A small fetch client replaced the TypeSafe SDK, and the dictionary became a generated JSON file.
   - The site is static files, and the Node server was deleted.
@@ -246,7 +248,7 @@ There are 20 prompts in `eval/cases.ts` (6 tuning, 14 held out). Each has automa
 
 ## Next.js for Vercel
 
-**User decision:** host on Vercel's free plan as a Next.js app. The browser-only design is unchanged.
+**My call:** host on Vercel's free plan as a Next.js app. The browser-only design is unchanged.
 - The page is a client component (`src/components/JevChat.tsx`, a React port of the earlier `web/app.ts`), and the shared code lives in `src/lib/`.
 - The Content-Security-Policy is now a real response header (`next.config.ts`), with `connect-src 'self' https://openrouter.ai`.
 - Telemetry moved to a same-origin route handler, `/api/t`. It keeps numbers only and logs them to the Vercel function logs.
@@ -263,7 +265,7 @@ There are 20 prompts in `eval/cases.ts` (6 tuning, 14 held out). Each has automa
 
 ## Pre-launch polish (website)
 
-Decided in a design interview with the user:
+Decided in a design interview (Claude asked, I answered):
 - **Word chips:** a reply renders as the tokens Jev chose. Hover or tap lights up the whole choice, dictionary words have a dotted underline, and the inspector explains the lookup ("after searching 19,375 words starting with s, r or p").
 - **Replay:** re-reveals a reply at 250 ms per word, holding 800 ms on dictionary lookups. After a reply, the inspector opens on its most interesting step (the first lookup, else the least confident word), and a one-time hint says words are clickable.
 - **Recorded demos:** visitors without a key can click any of 6 example prompts to play real Jev runs recorded with `scripts/record-demos.ts` (tagged "recorded run"). With a key, the same prompts run live.

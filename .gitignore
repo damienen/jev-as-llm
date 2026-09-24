@@ -8,3 +8,5 @@ next-env.d.ts
 .vercel
 
 scripts/demo-candidates.json
+.claude/
+!.env.example

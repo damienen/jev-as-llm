@@ -1,65 +1,96 @@
 # Jev as LLM
 
-An experiment: how close can [TypeSafe](https://docs.typesafe.ai)'s Jev get to chatting like an LLM? Jev is a System One model that returns typed judgments and probabilities, and it was never trained to write. **The full story (every attempt, result and decision, including the approaches that failed and were removed) is in [EXPERIMENT_LOG.md](EXPERIMENT_LOG.md).**
+**Try it: https://jev-as-llm.vercel.app**
 
-It's a Next.js app built for Vercel's free Hobby plan.
+[Jev](https://docs.typesafe.ai) is TypeSafe's judgment model. You give it some text and a question with a fixed set of answers, and it gives you back probabilities. It was never trained to write. This project makes it chat anyway, one word at a time, by asking it the same kind of question over and over: which of these words should come next?
 
-## Your key never touches our server
+![A reply built by Jev, with the probabilities it gave the candidate words](docs/preview.png)
 
-The chat runs entirely in the visitor's browser, which calls Jev through OpenRouter with the visitor's own OpenRouter key:
+The site shows every choice as it happens. Tap any word in a reply to see what else Jev considered, or replay the whole reply step by step.
 
-```
-Browser (Next.js page, client component)                      OpenRouter
-  decoder, dictionary, UI ──── visitor's key, per request ────▶ /api/alpha/decisions (Jev 1.13)
-        │
-        └── anonymous usage count ──▶ /api/t on this site (numbers only, logged)
-```
+## Try it
 
-- The key is stored in the browser (localStorage) and sent only to `openrouter.ai`.
-- The site sends a `Content-Security-Policy` header with `connect-src 'self' https://openrouter.ai`, so the browser refuses to send data anywhere else. Anyone can check it in the Network tab or the response headers.
-- `/api/t` keeps only step count, tokens, time, lookups and stop reason, and drops any other field. It writes one `jev-telemetry {...}` line per reply to the function logs. Set `NEXT_PUBLIC_TELEMETRY=off` to turn it off.
-- Why OpenRouter: `api.typesafe.ai` rejects browser requests from other sites (CORS), while OpenRouter serves the same Jev with the same request format and allows any origin.
+- **No key needed for the examples.** The six example prompts replay real runs that were recorded earlier.
+- **Live, with your own key.** Paste an [OpenRouter key](https://openrouter.ai/workspaces/default/keys) and ask anything. A reply usually costs less than a cent. Give the key a credit limit and an expiry date when you create it.
 
 ## How it works
 
-Jev can't write, but it's good at picking the best option from a list. So the app turns writing into a series of multiple-choice questions, one per word:
+Every step is one multiple-choice question to Jev:
 
-1. **Pick the next word.** Jev picks from about 250 options: words from the conversation, common English words, punctuation, **look up** and **stop**. Each option shows the reply continuing with that word.
-2. **Look up a word that isn't listed.** If Jev chooses look up, it picks likely first letters. Then every dictionary word starting with those letters (up to about 9k, out of 75k) is searched as parallel 250-option Choices in one round trip. The dictionary is a separate chunk, loaded on first use.
-3. **Code handles the mechanics:** spacing, a/an agreement, and guards against repetition and loops. Output is lowercase.
+1. **Which word comes next?** The options are about 250 words: words from the conversation, common English words, punctuation, plus "look up" and "stop". Each option shows the reply continuing with that word, because Jev is much better at comparing whole readable options than at abstract choices.
+2. **Look up a rarer word.** If Jev picks "look up", it chooses likely first letters. Then every word starting with them (up to about 19,000, out of a 75,000-word dictionary) goes out as parallel 250-option questions in one round trip, and Jev picks the winner. That's how it finds words like "seine" or "sapphire".
+3. **Code handles the mechanics.** Spacing, "a" versus "an", no punctuation straight after "the", no endless repeats, and a 300-character cap. Output is lowercase.
 
-An optional **judge** (Jev scoring the top candidates as whole replies) exists but is off: in the eval it cost about 1.7× as much for no net gain.
+It stops when Jev picks "stop".
 
-## Run and deploy
+## Your key never reaches our server
+
+```
+Your browser (the whole app runs here)                      OpenRouter
+  decoder, dictionary, UI ──── your key, per request ────▶ /api/alpha/decisions (Jev 1.13)
+        │
+        └── anonymous usage count ──▶ /api/t on this site (numbers only)
+```
+
+- Your key is stored in your browser and sent only to `openrouter.ai`.
+- The site's `Content-Security-Policy` header (`connect-src 'self' https://openrouter.ai`) makes the browser refuse to send data anywhere else. You can check it in your browser's developer tools.
+- `/api/t` receives the step count, token count, time, number of lookups and stop reason for each live reply. It keeps nothing else, so no prompt, reply or key. Set `NEXT_PUBLIC_TELEMETRY=off` to switch it off.
+- Why OpenRouter and not TypeSafe directly? TypeSafe's API refuses requests from other websites (CORS). OpenRouter serves the same Jev model with the same request format and accepts browser requests.
+
+## What we learned
+
+The full story, with every failed attempt and the numbers, is in [EXPERIMENT_LOG.md](EXPERIMENT_LOG.md). The short version:
+
+- Letter by letter doesn't work. We tried framing the task, making spaces visible, offering whole candidate replies, dictionary hints and a judge, and every version broke in the same place: Jev can finish a word it has started but can't pick the next word one letter at a time.
+- Whole words work much better. When each option is the reply continued by one whole word, the result reads like a chat reply, and Jev gets facts right (Tokyo, the Seine, carnivores).
+- Jev is a very good judge of whole replies, but in our eval the judge didn't beat the plain word picker once we counted cost and repetition loops, so it's switched off.
+- The dictionary search only works because one request can carry dozens of independent questions.
+- We put the mechanics in code (spacing, grammar guards, loop limits) and left the word choices to Jev.
+
+Names that aren't in the dictionary (like "Thames") are its main blind spot.
+
+## Run it locally
 
 ```bash
 npm install
-npm run dev                  # http://localhost:3000, paste your OpenRouter key in the page
-npm run build && npm start   # production build locally
+npm run dev          # http://localhost:3000
 ```
 
-**Deploy to Vercel:** import the repo at vercel.com/new (framework: Next.js, no settings or environment variables needed), or run `npx vercel`. The Hobby plan is free for personal, non-commercial projects.
-
-Scripts (they read `OPENROUTER_API_KEY`, or else `TYPESAFE_API_KEY`, from `.env`):
+For the command-line scripts, copy `.env.example` to `.env` and add an `OPENROUTER_API_KEY`:
 
 ```bash
-npm run one -- "Name three fruits."          # one prompt, step by step
-npm run eval                                 # eval suite -> results/eval-*.md (add "judge,nojudge" to compare)
-npm run build:vocab                          # regenerate src/lib/generated/vocab.json from the word lists
+npm run one -- "Name three fruits."     # one prompt, printed step by step
+npm run eval                            # 20 prompts with automatic checks -> results/eval-*.md
+npx tsx scripts/record-demos.ts         # re-record the example runs
+npm run build:vocab                     # rebuild the dictionary from the word lists
 ```
 
-## Layout
+It deploys to Vercel as-is. Import the repo, and no settings or environment variables are needed.
+
+## Project layout
 
 | Path | What |
 |---|---|
-| `src/components/` | The chat UI (client components; all Jev calls happen in the browser): `JevChat`, `ReplyText` (word chips), `Inspector`, `KeyEntry`, `BottomSheet` |
-| `src/lib/demos.json`, `scripts/record-demos.ts` | Recorded runs that visitors without a key can replay, and the script that records them |
-| `src/app/` | `layout.tsx`, `page.tsx`, `globals.css`, `icon.svg`, `opengraph-image.tsx` (link preview) and `api/t/route.ts` (anonymous telemetry) |
-| `next.config.ts` | Security headers, including the Content-Security-Policy |
-| `src/lib/decode.ts` | The decoder loop: word choice, lookup, optional judge, rules, context window |
-| `src/lib/wordgen.ts` | The Jev questions: next word, first letter, dictionary lists, final pick |
-| `src/lib/jev.ts` | Fetch client for OpenRouter (browser and Node) or TypeSafe (Node only), errors, judge |
-| `src/lib/words.ts`, `src/lib/vocab.ts`, `src/lib/generated/vocab.json` | Candidate word list and spacing rules; the 75k-word dictionary |
-| `scripts/` | Single-prompt runner, demo recorder and dictionary build |
-| `eval/` | Eval cases (20 prompts with automatic checks) and the runner |
-| `results/` | Eval reports and the transcripts quoted in the experiment log |
+| `src/components/` | The chat UI: `JevChat`, `ReplyText` (word chips), `Inspector`, `KeyEntry`, `BottomSheet` |
+| `src/lib/decode.ts` | The decoder loop: word choice, lookup, grammar and loop rules, context window |
+| `src/lib/wordgen.ts` | The questions sent to Jev |
+| `src/lib/jev.ts` | Small fetch client for OpenRouter (browser and Node) or TypeSafe (Node only) |
+| `src/lib/words.ts`, `src/lib/vocab.ts` | The common-word list and the lazily loaded dictionary |
+| `src/lib/demos.json` | The recorded example runs |
+| `src/app/` | Next.js pages, the link-preview image and the telemetry route |
+| `next.config.ts` | Security headers |
+| `eval/`, `scripts/` | Eval suite, single-prompt runner, demo recorder, dictionary builder |
+| `results/` | Transcripts and eval reports quoted in the experiment log |
+
+## Credits
+
+- [Jev](https://docs.typesafe.ai) by TypeSafe, served through [OpenRouter](https://openrouter.ai).
+- Dictionary from the [SCOWL](http://wordlist.aspell.net/) word lists (via [`wordlist-english`](https://github.com/jacksonrayhamilton/wordlist-english)) and [`countries-list`](https://github.com/annexare/Countries). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- Geist fonts by Vercel.
+- Built as a pairing session with Claude Code. The experiment log explains who did what.
+
+This is an independent experiment, not affiliated with or endorsed by TypeSafe or OpenRouter.
+
+## License
+
+[MIT](LICENSE), except for the third-party material listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
